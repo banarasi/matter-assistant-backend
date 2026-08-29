@@ -61,3 +61,19 @@ async def test_create_shell_is_idempotent(graph, fake_mcp):
     # only one matter row exists even though the node ran once and could be retried
     res = await fake_mcp.call("get_matter", {"matter_id": "MAT-2026-001246"})
     assert res["ok"] is False  # no second matter was created
+
+
+async def test_create_shell_replay_does_not_duplicate_matter(graph, fake_mcp):
+    cfg = {"configurable": {"thread_id": "r4"}}
+    await drive_to_pic_risk(graph, cfg, "r4")
+    await send(graph, cfg, {"type": "card_submit", "values": {
+        "pic_employee_id": "E1001", "pic_employee_name": "Jane Smith", **RISK}})
+    # Answering the MatterCreatedCard resumes create_shell, which replays its
+    # whole body — including the pre-interrupt create_matter call. The
+    # idempotency key must make the MCP server replay the cached response
+    # instead of inserting a second matter row.
+    await send(graph, cfg, {"type": "action", "name": "add_org"})
+    res = await fake_mcp.call("get_matter", {"matter_id": "MAT-2026-001246"})
+    assert res["ok"] is False  # replayed create_matter did not create a duplicate
+    res = await fake_mcp.call("get_matter", {"matter_id": "MAT-2026-001245"})
+    assert res["ok"] is True  # original matter row still exists
