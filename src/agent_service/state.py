@@ -35,6 +35,11 @@ class MatterDraft(BaseModel):
     budgets: list[dict] = Field(default_factory=list)
     submitted: bool = False
     return_to: str | None = None
+    # Transient per-turn scratch space (e.g. employee search results) that must
+    # survive a goto-self loop within one node but is never part of the matter
+    # payload sent to the MCP server. Cleared ({}) whenever a node hands off to
+    # the next stage.
+    ui_results: dict = Field(default_factory=dict)
 
     def core_payload(self) -> dict:
         keys = ["matter_name", "pabu", "matter_type", "matter_subtype", "country",

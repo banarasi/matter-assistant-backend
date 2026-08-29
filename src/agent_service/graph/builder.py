@@ -32,8 +32,7 @@ def build_graph(model: ModelClient, mcp: MCPCaller, checkpointer):
     # Command(goto=...) targets from earlier stages always resolve. Each
     # placeholder just interrupts; it is superseded once the real node module
     # lands and is registered above.
-    for placeholder_name in ("pic_risk", "counsel", "allocation", "budget",
-                             "review", "submit"):
+    for placeholder_name in ("counsel", "allocation", "budget", "review", "submit"):
         if placeholder_name not in nodes:
             async def _placeholder(state: MatterDraft):
                 interrupt({})

@@ -151,8 +151,13 @@ def make_intake_nodes(model: ModelClient, mcp: MCPCaller):
             return Command(goto="jurisdiction")
         country = payload["values"]["country"]
         region = payload["values"].get("state_region")
-        res = await mcp.call("get_required_fields", {"country": country})
-        fields = res.get("fields", [])
+        try:
+            res = await mcp.call("get_required_fields", {"country": country})
+        except Exception as e:
+            writer(events.error("MCP_UNAVAILABLE", f"required fields unavailable: {e}", None))
+            return Command(update={"country": country, "state_region": region},
+                           goto="jurisdiction")
+        fields = res.get("fields", []) if res.get("ok") else []
         if fields:
             writer(events.card("AdditionalInfoNotice", fields=fields))
         dest = nxt(state, "cond_fields" if fields else "pic_risk")
