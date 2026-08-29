@@ -67,9 +67,11 @@ def make_setup_nodes(model, mcp: MCPCaller):
             updates = {k: v for k, v in payload.get("values", {}).items()
                       if k in COUNSEL_FIELDS}
             merged = {**values, **updates}
-            if not merged["organization_id"]:
+            if not merged["organization_id"] or not merged["organization_name"]:
+                field = ("organization_id" if not merged["organization_id"]
+                         else "organization_name")
                 writer(events.error("REQUIRED_FIELD_MISSING",
-                                    "select an organization", "organization_id"))
+                                    "select an organization", field))
                 return Command(update=updates, goto="counsel")
             res = await _call(mcp, writer, "add_matter_party", {
                 "matter_id": state.matter_id, "org_id": merged["organization_id"],
@@ -119,17 +121,19 @@ def make_setup_nodes(model, mcp: MCPCaller):
         if len(allocs) > 1 and validation.allocations_total(allocs) != 100:
             writer(events.error("ALLOCATION_SUM_INVALID",
                                 "allocations must total exactly 100%", "allocations"))
-            return Command(goto="allocation")
+            # keep the submitted (invalid) split so the re-rendered card shows
+            # the user's input instead of silently reverting it
+            return Command(update={"allocations": allocs}, goto="allocation")
         res = await _call(mcp, writer, "set_cost_allocation", {
             "matter_id": state.matter_id, "allocations": allocs,
             "idempotency_key": idem_key(state, "alloc", {"a": allocs}),
             **WHO(state)})
         if res is None:
-            return Command(goto="allocation")
+            return Command(update={"allocations": allocs}, goto="allocation")
         if not res.get("ok"):
             e = res["error"]
             writer(events.error(e["code"], e["message"], e.get("field")))
-            return Command(goto="allocation")
+            return Command(update={"allocations": allocs}, goto="allocation")
         dest = nxt(state, "budget")
         return Command(
             update={"allocations": res["allocations"], "current_stage": dest,
@@ -143,36 +147,53 @@ def make_setup_nodes(model, mcp: MCPCaller):
         c = events.card(
             "BudgetCard", org_name=state.organization_name,
             fiscal_periods=fiscal_periods,
-            values={"amount": None, "currency": "USD", "fiscal_period": None},
+            # transient echo of the last (rejected) submission so the user's
+            # input re-renders after a validation-error goto-self loop
+            values=state.ui_results.get("budget_draft")
+                   or {"amount": None, "currency": "USD", "fiscal_period": None},
         )
         writer(c)
         payload = interrupt(c)
         if payload.get("type") != "card_submit":
             return Command(goto="budget")
         v = payload["values"]
-        if not v.get("amount") or not v.get("fiscal_period"):
+
+        def echo():  # preserve the submitted values across the goto-self loop
+            return Command(update={"ui_results": {**state.ui_results, "budget_draft": v}},
+                           goto="budget")
+
+        try:
+            amount = float(v.get("amount") or 0)
+        except (ValueError, TypeError):
+            amount = 0.0
+        if amount <= 0:
             writer(events.error("REQUIRED_FIELD_MISSING",
-                                "amount and fiscal period are required", "amount"))
-            return Command(goto="budget")
+                                "a positive amount is required", "amount"))
+            return echo()
+        if not v.get("fiscal_period"):
+            writer(events.error("REQUIRED_FIELD_MISSING",
+                                "fiscal period is required", "fiscal_period"))
+            return echo()
         res = await _call(mcp, writer, "create_budget", {
             "matter_id": state.matter_id, "org_id": state.organization_id,
-            "amount": float(v["amount"]), "currency": v.get("currency", "USD"),
+            "amount": amount, "currency": v.get("currency", "USD"),
             "fiscal_period": v["fiscal_period"],
             "idempotency_key": idem_key(state, "budget", v),
             **WHO(state)})
         if res is None:
-            return Command(goto="budget")
+            return echo()
         if not res.get("ok"):
             e = res["error"]
             writer(events.error(e["code"], e["message"], e.get("field")))
-            return Command(goto="budget")
+            return echo()
         new_budgets = state.budgets + [{
             "org_id": state.organization_id, "org_name": state.organization_name,
-            "amount": float(v["amount"]), "currency": v.get("currency", "USD"),
+            "amount": amount, "currency": v.get("currency", "USD"),
             "fiscal_period": v["fiscal_period"]}]
         dest = nxt(state, "review")
         return Command(
-            update={"budgets": new_budgets, "current_stage": dest, "return_to": None},
+            update={"budgets": new_budgets, "current_stage": dest, "return_to": None,
+                    "ui_results": {}},
             goto=dest)
 
     return {"counsel": counsel, "allocation": allocation, "budget": budget}

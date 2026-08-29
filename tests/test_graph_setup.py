@@ -63,3 +63,50 @@ async def test_single_allocation_auto_100_and_budget_uniqueness(graph, fake_mcp)
     snap = await fake_mcp.call("get_matter", {"matter_id": "MAT-2026-001245"})
     assert snap["allocations"][0]["pct"] == 100
     assert snap["budgets"][0]["amount"] == 150000.0
+
+
+def error_fields(evs):
+    return [(e["code"], e.get("field")) for e in evs if e.get("type") == "error"]
+
+
+async def test_counsel_rejects_missing_org_name(graph, fake_mcp):
+    cfg = {"configurable": {"thread_id": "s4"}}
+    await drive_to_counsel(graph, cfg, "s4")
+    evs = await send(graph, cfg, {"type": "card_submit", "values": {
+        "organization_id": "ORG-BM"}})
+    assert ("REQUIRED_FIELD_MISSING", "organization_name") in error_fields(evs)
+    assert "AllocationCard" not in cards(evs)  # still on counsel
+    snap = await fake_mcp.call("get_matter", {"matter_id": "MAT-2026-001245"})
+    assert snap["parties"] == []  # nothing was written
+
+
+async def test_allocation_error_preserves_submitted_split(graph):
+    cfg = {"configurable": {"thread_id": "s5"}}
+    await drive_to_counsel(graph, cfg, "s5")
+    await send(graph, cfg, {"type": "card_submit", "values": {
+        "organization_id": "ORG-BM", "organization_name": "Baker McKenzie"}})
+    bad = [{"cc_id": "100045", "pct": 60}, {"cc_id": "100078", "pct": 30}]
+    evs = await send(graph, cfg, {"type": "card_submit", "values": {"allocations": bad}})
+    assert "ALLOCATION_SUM_INVALID" in errors(evs)
+    # the re-rendered card echoes the invalid split instead of reverting it
+    assert last_card(evs, "AllocationCard")["values"]["allocations"] == bad
+
+
+async def test_budget_rejects_nonpositive_amount(graph, fake_mcp):
+    cfg = {"configurable": {"thread_id": "s6"}}
+    await drive_to_counsel(graph, cfg, "s6")
+    await send(graph, cfg, {"type": "card_submit", "values": {
+        "organization_id": "ORG-BM", "organization_name": "Baker McKenzie"}})
+    await send(graph, cfg, {"type": "card_submit", "values": {"allocations": [
+        {"cc_id": "100045", "pct": None}]}})
+    evs = await send(graph, cfg, {"type": "card_submit", "values": {
+        "amount": -500, "currency": "USD", "fiscal_period": "FY2027"}})
+    assert ("REQUIRED_FIELD_MISSING", "amount") in error_fields(evs)
+    # submitted values are echoed back on the re-rendered card
+    assert last_card(evs, "BudgetCard")["values"]["amount"] == -500
+    snap = await fake_mcp.call("get_matter", {"matter_id": "MAT-2026-001245"})
+    assert snap["budgets"] == []  # no budget row was created
+    # missing fiscal_period highlights the right field
+    evs = await send(graph, cfg, {"type": "card_submit", "values": {
+        "amount": 1000, "currency": "USD"}})
+    assert ("REQUIRED_FIELD_MISSING", "fiscal_period") in error_fields(evs)
