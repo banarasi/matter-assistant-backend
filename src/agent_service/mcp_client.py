@@ -18,6 +18,6 @@ class MCPClient:
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 result = await session.call_tool(tool, args)
-                if getattr(result, "structuredContent", None):
+                if getattr(result, "structuredContent", None) is not None:
                     return result.structuredContent
                 return json.loads(result.content[0].text)
