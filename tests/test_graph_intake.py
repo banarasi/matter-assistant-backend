@@ -61,6 +61,37 @@ async def test_jurisdiction_us_skips_cond_fields(fake_mcp):
     assert "AdditionalFieldsCard" not in cards(evs)
 
 
+class CountingStubModelClient(StubModelClient):
+    """Counts extract() calls to prove interrupt-resume replay never re-runs LLM work."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.extract_calls = 0
+
+    async def extract(self, schema, instruction, text):
+        self.extract_calls += 1
+        return await super().extract(schema, instruction, text)
+
+
+async def test_no_duplicate_llm_calls_across_turns(fake_mcp):
+    stub = CountingStubModelClient(extractions=[BasicsExtract(
+        matter_name="Employment Investigation - Zurich Office",
+        pabu_label="Employment Legal",
+        matter_type_label="Employment Investigation",
+        matter_subtype_label="Policy Violation")])
+    graph = build_graph(stub, fake_mcp, MemorySaver())
+    cfg = {"configurable": {"thread_id": "t-count"}}
+    await start(graph, cfg, conversation_id="t-count")
+    await send(graph, cfg, {"type": "action", "name": "start"})
+    await send(graph, cfg, {"type": "text",
+                            "text": "employment investigation, policy violation, Zurich"})
+    evs = await send(graph, cfg, {"type": "card_submit", "values": {}})
+    assert "JurisdictionCard" in cards(evs)
+    # The card_submit resume replays the basics node body, but the single-interrupt
+    # pattern means the text-turn's extract() is never re-executed.
+    assert stub.extract_calls == 1
+
+
 async def test_free_text_extraction_prefills(fake_mcp):
     stub = StubModelClient(extractions=[BasicsExtract(
         matter_name="Employment Investigation - Zurich Office",
