@@ -190,7 +190,7 @@ def make_setup_nodes(model, mcp: MCPCaller):
             "org_id": state.organization_id, "org_name": state.organization_name,
             "amount": amount, "currency": v.get("currency", "USD"),
             "fiscal_period": v["fiscal_period"]}]
-        dest = nxt(state, "review")
+        dest = nxt(state, "review_summary")
         return Command(
             update={"budgets": new_budgets, "current_stage": dest, "return_to": None,
                     "ui_results": {}},

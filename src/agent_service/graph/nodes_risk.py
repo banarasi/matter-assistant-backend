@@ -134,7 +134,8 @@ def make_risk_nodes(model, mcp: MCPCaller):
         writer(c)
         payload_in = interrupt(c)
         name = payload_in.get("name", "continue")
-        dest = {"configure_budget": "allocation", "review": "review"}.get(name, "counsel")
+        dest = {"configure_budget": "allocation",
+                "review": "review_summary"}.get(name, "counsel")
         return Command(update={"matter_id": matter_id, "current_stage": dest}, goto=dest)
 
     return {"pic_risk": pic_risk, "create_shell": create_shell}
