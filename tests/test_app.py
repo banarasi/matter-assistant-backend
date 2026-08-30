@@ -42,3 +42,20 @@ async def test_message_roundtrip_and_state(client):
     body = r.json()
     assert body["values"]["current_stage"] == "basics"
     assert body["pending_card"]["card"] == "BasicInfoCard"
+
+
+class ExplodingGraph:
+    def astream(self, *args, **kwargs):
+        async def gen():
+            yield {"type": "stage_change", "stage": "welcome"}
+            raise RuntimeError("boom")
+        return gen()
+
+
+async def test_stream_error_still_emits_done(client):
+    app.state.graph_override = ExplodingGraph()
+    r = await client.post("/conversations/abc123/messages",
+                          json={"type": "action", "name": "start"})
+    events = parse_sse(r.text)
+    assert any(e.get("type") == "error" and e.get("code") == "INTERNAL" for e in events)
+    assert events[-1]["type"] == "done"
