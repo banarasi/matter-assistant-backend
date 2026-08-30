@@ -40,6 +40,25 @@ async def test_pic_search_and_verify(graph):
     assert last_card(evs, "MatterCreatedCard")["matter_id"] == "MAT-2026-001245"
 
 
+async def test_pic_search_preserves_unsent_risk_fields(graph):
+    cfg = {"configurable": {"thread_id": "r-draft"}}
+    await drive_to_pic_risk(graph, cfg, "r-draft")
+    evs = await send(graph, cfg, {
+        "type": "action", "name": "search_employee", "query": "jane", "values": RISK})
+    values = last_card(evs, "PicRiskCard")["values"]
+    assert all(values[field] == value for field, value in RISK.items())
+
+
+async def test_pic_name_is_canonicalized_by_server(graph):
+    cfg = {"configurable": {"thread_id": "r-canonical"}}
+    await drive_to_pic_risk(graph, cfg, "r-canonical")
+    evs = await send(graph, cfg, {"type": "card_submit", "values": {
+        "pic_employee_id": "E1001", "pic_employee_name": "Spoofed Name", **RISK}})
+    assert last_card(evs, "AccessVerifiedBadge")["employee_name"] == "Jane Smith"
+    snapshot = await graph.aget_state(cfg)
+    assert snapshot.values["pic_employee_name"] == "Jane Smith"
+
+
 async def test_pic_not_entitled_blocks(graph):
     cfg = {"configurable": {"thread_id": "r2"}}
     await drive_to_pic_risk(graph, cfg, "r2")

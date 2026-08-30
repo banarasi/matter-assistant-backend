@@ -1,7 +1,6 @@
-import pytest
 from pydantic import BaseModel
 
-from agent_service.model_client import StubModelClient, make_model_client
+from agent_service.model_client import AnthropicModelClient, StubModelClient, make_model_client
 
 
 class Toy(BaseModel):
@@ -25,3 +24,19 @@ def test_factory_returns_stub(monkeypatch):
     from agent_service import config
     s = config.Settings(use_stub_model=True)
     assert isinstance(make_model_client(s), StubModelClient)
+
+
+def test_live_client_has_bounded_timeout_and_retries(monkeypatch):
+    from agent_service import model_client
+    from agent_service.config import Settings
+
+    captured = {}
+
+    class FakeAnthropic:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(model_client.anthropic, "AsyncAnthropic", FakeAnthropic)
+    AnthropicModelClient(Settings(anthropic_api_key="test"))
+    assert captured["timeout"] == 30.0
+    assert captured["max_retries"] == 2

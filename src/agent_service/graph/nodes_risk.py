@@ -4,7 +4,7 @@ from langgraph.types import Command, interrupt
 from .. import events
 from ..mcp_client import MCPCaller
 from ..state import MatterDraft
-from .nodes_intake import fetch_values, idem_key, nxt
+from .nodes_intake import fetch_values, idem_key, nxt, report_mcp_failure, who
 
 PIC_FIELDS = ("pic_employee_id", "pic_employee_name")
 RISK_FIELDS = ("incident_risk_category", "nfr_taxonomy", "risk_theme")
@@ -18,8 +18,8 @@ async def _call(mcp: MCPCaller, writer, tool: str, args: dict) -> dict | None:
     # caller treats it as a failed call (None) rather than crashing the node.
     try:
         return await mcp.call(tool, args)
-    except Exception as e:
-        writer(events.error("MCP_UNAVAILABLE", f"{tool} unavailable: {e}", None))
+    except Exception:
+        report_mcp_failure(writer, tool)
         return None
 
 
@@ -38,34 +38,40 @@ def make_risk_nodes(model, mcp: MCPCaller):
             # matches" from "never searched" for the card's empty-result note.
             searched="employees" in state.ui_results,
             values=values,
-            incident_risk_categories=await fetch_values(mcp, "incident_risk_category"),
-            nfr_taxonomies=await fetch_values(mcp, "nfr_taxonomy"),
-            risk_themes=await fetch_values(mcp, "risk_theme"),
+            incident_risk_categories=await fetch_values(
+                mcp, "incident_risk_category", state=state),
+            nfr_taxonomies=await fetch_values(mcp, "nfr_taxonomy", state=state),
+            risk_themes=await fetch_values(mcp, "risk_theme", state=state),
         )
         writer(c)
         payload = interrupt(c)
         ptype = payload.get("type")
 
         if ptype == "action" and payload.get("name") == "search_employee":
+            draft = {k: v for k, v in payload.get("values", {}).items() if k in ALL_FIELDS}
             res = await _call(mcp, writer, "search_employees",
-                              {"query": payload.get("query", "")})
+                              {"query": payload.get("query", ""), **who(state)})
             if res is None:
-                return Command(goto="pic_risk")
-            return Command(update={"ui_results": {"employees": res.get("employees", [])}},
+                return Command(update=draft, goto="pic_risk")
+            return Command(update={**draft,
+                                   "ui_results": {"employees": res.get("employees", [])}},
                            goto="pic_risk")
 
         if ptype == "action" and payload.get("name") == "pic_self":
-            first = state.requested_by.split(".")[0]
-            res = await _call(mcp, writer, "search_employees", {"query": first})
+            draft = {k: v for k, v in payload.get("values", {}).items() if k in RISK_FIELDS}
+            directory_name = state.requested_by.split("@", 1)[0].replace(".", " ")
+            res = await _call(mcp, writer, "search_employees",
+                              {"query": directory_name, **who(state)})
             if res is None:
-                return Command(goto="pic_risk")
+                return Command(update=draft, goto="pic_risk")
             found = res.get("employees", [])
             if found:
                 emp = found[0]
-                return Command(update={"pic_employee_id": emp["id"],
+                return Command(update={**draft, "pic_employee_id": emp["id"],
                                        "pic_employee_name": emp["name"]},
                                goto="pic_risk")
-            return Command(update={"ui_results": {"employees": found}}, goto="pic_risk")
+            return Command(update={**draft, "ui_results": {"employees": found}},
+                           goto="pic_risk")
 
         if ptype == "card_submit":
             updates = {k: v for k, v in payload.get("values", {}).items() if k in ALL_FIELDS}
@@ -76,7 +82,7 @@ def make_risk_nodes(model, mcp: MCPCaller):
                                     f"{missing[0]} is required", missing[0]))
                 return Command(update=updates, goto="pic_risk")
             res = await _call(mcp, writer, "verify_matter_access",
-                              {"employee_id": probe.pic_employee_id})
+                              {"employee_id": probe.pic_employee_id, **who(state)})
             if res is None:
                 return Command(update=updates, goto="pic_risk")
             if not res.get("ok"):
@@ -89,7 +95,9 @@ def make_risk_nodes(model, mcp: MCPCaller):
                     f"{probe.pic_employee_name} has no Passport entitlement — "
                     "please choose another PIC", "pic_employee_id"))
                 return Command(update=updates, goto="pic_risk")
-            writer(events.card("AccessVerifiedBadge", employee_name=probe.pic_employee_name))
+            canonical_name = res["employee"]["name"]
+            updates["pic_employee_name"] = canonical_name
+            writer(events.card("AccessVerifiedBadge", employee_name=canonical_name))
             dest = nxt(state, "create_shell")
             return Command(update={**updates, "access_verified": True,
                                    "current_stage": dest, "return_to": None,

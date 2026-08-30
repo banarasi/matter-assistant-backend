@@ -1,4 +1,3 @@
-import pytest
 from langgraph.checkpoint.memory import MemorySaver
 
 from agent_service.graph.builder import build_graph

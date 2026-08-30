@@ -6,22 +6,21 @@ from langgraph.types import Command, interrupt
 
 from .. import events
 from ..state import MatterDraft
-from .nodes_intake import ask, idem_key
+from .nodes_intake import ask, idem_key, report_mcp_failure, who
 
-EDIT_TARGETS = {"basics", "jurisdiction", "cond_fields", "pic_risk",
-                "counsel", "allocation", "budget"}
+EDIT_TARGETS = {"counsel", "allocation", "budget"}
 
 
-async def _get_matter(mcp, writer, matter_id: str) -> dict | None:
+async def _get_matter(mcp, writer, matter_id: str, state: MatterDraft) -> dict | None:
     # Same guard shape as nodes_setup._call / nodes_risk._call: a transport
     # failure (MCP server down/unreachable) is an agent-side concern, not a
     # business error returned by a tool, so it gets its own MCP_UNAVAILABLE
     # event and the caller treats it as a failed call (None) rather than
     # crashing the node.
     try:
-        snap = await mcp.call("get_matter", {"matter_id": matter_id})
-    except Exception as e:
-        writer(events.error("MCP_UNAVAILABLE", f"get_matter unavailable: {e}", None))
+        snap = await mcp.call("get_matter", {"matter_id": matter_id, **who(state)})
+    except Exception:
+        report_mcp_failure(writer, "get_matter")
         return None
     if not snap.get("ok"):
         e = snap["error"]
@@ -40,7 +39,7 @@ def make_review_nodes(model, mcp):
         # visit instead of re-streaming on every ReviewCard resume.
         writer = get_stream_writer()
         writer(events.stage("review"))
-        snap = await _get_matter(mcp, writer, state.matter_id)
+        snap = await _get_matter(mcp, writer, state.matter_id, state)
         if snap is None:
             return Command(goto="basics", update={"current_stage": "basics"})
         await ask(model, writer,
@@ -54,7 +53,7 @@ def make_review_nodes(model, mcp):
         # fetch + card emit below replay (a benign duplicate card), never the
         # narrative (that lives in review_summary, which has no interrupt).
         writer = get_stream_writer()
-        snap = await _get_matter(mcp, writer, state.matter_id)
+        snap = await _get_matter(mcp, writer, state.matter_id, state)
         if snap is None:
             return Command(goto="basics", update={"current_stage": "basics"})
         c = events.card("ReviewCard", snapshot=snap)
@@ -85,8 +84,8 @@ def make_review_nodes(model, mcp):
                 "idempotency_key": idem_key(state, "submit"),
                 "requested_by": state.requested_by,
                 "correlation_id": state.correlation_id})
-        except Exception as e:
-            writer(events.error("MCP_UNAVAILABLE", f"submission failed: {e}", None))
+        except Exception:
+            report_mcp_failure(writer, "submit_matter")
             return Command(goto="review", update={"current_stage": "review"})
         if not res.get("ok"):
             e = res["error"]

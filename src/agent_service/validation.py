@@ -13,4 +13,7 @@ def missing_cond_fields(state: MatterDraft) -> list[str]:
 
 
 def allocations_total(allocs: list[dict]) -> int:
-    return sum(int(a.get("pct") or 0) for a in allocs)
+    try:
+        return sum(int(a.get("pct") or 0) for a in allocs)
+    except (AttributeError, TypeError, ValueError):
+        return 0

@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 
 from langgraph.config import get_stream_writer
 from langgraph.types import Command, interrupt
@@ -9,6 +10,8 @@ from .. import events, validation
 from ..mcp_client import MCPCaller
 from ..model_client import ModelClient
 from ..state import MatterDraft
+
+logger = logging.getLogger(__name__)
 
 STEPS = ["Matter Details", "Risk & Classification", "Organizations & Counsel",
          "Budgets & Cost Centers", "Review & Submit"]
@@ -45,19 +48,47 @@ def nxt(state: MatterDraft, default: str) -> str:
 
 
 async def ask(model: ModelClient, writer, system: str, user: str) -> None:
-    async for delta in model.converse_stream(system, user):
-        writer(events.text_delta(delta))
+    try:
+        async for delta in model.converse_stream(system, user):
+            writer(events.text_delta(delta))
+    except Exception:
+        report_model_failure(writer, "conversation")
 
 
-async def fetch_values(mcp: MCPCaller, domain: str, parent: str | None = None) -> list:
+def report_model_failure(writer, operation: str) -> None:
+    logger.exception("Model %s failed", operation)
+    writer(events.error(
+        "MODEL_UNAVAILABLE",
+        "The language model is temporarily unavailable; your saved form data is intact.",
+    ))
+
+
+def report_mcp_failure(writer, operation: str) -> None:
+    logger.exception("MCP operation %s failed", operation)
+    writer(events.error(
+        "MCP_UNAVAILABLE",
+        "The data service is temporarily unavailable. Please try again.",
+        None,
+    ))
+
+
+def who(state: MatterDraft) -> dict:
+    return {"requested_by": state.requested_by, "correlation_id": state.correlation_id}
+
+
+async def fetch_values(mcp: MCPCaller, domain: str, parent: str | None = None,
+                       state: MatterDraft | None = None) -> list:
     # MCP_UNAVAILABLE is an agent-side transport error code: it is emitted here
     # (not by the MCP server) when the reference-data call itself fails, so the
     # turn degrades to an empty picklist instead of crashing.
     try:
-        res = await mcp.call("get_reference_data", {"domain": domain, "parent": parent})
-    except Exception as e:
+        args = {"domain": domain, "parent": parent}
+        if state is not None:
+            args.update(who(state))
+        res = await mcp.call("get_reference_data", args)
+    except Exception:
         writer = get_stream_writer()
-        writer(events.error("MCP_UNAVAILABLE", f"reference data unavailable: {e}", None))
+        report_mcp_failure(writer, "get_reference_data")
         return []
     return res.get("values", []) if res.get("ok") else []
 
@@ -66,10 +97,13 @@ def match_label(values: list[dict], label: str | None) -> str | None:
     if not label:
         return None
     low = label.strip().lower()
-    for v in values:
-        if v["label"].lower() == low or low in v["label"].lower():
-            return v["id"]
-    return None
+    if not low:
+        return None
+    exact = next((v for v in values if v["label"].lower() == low), None)
+    if exact:
+        return exact["id"]
+    partial = [v for v in values if low in v["label"].lower()]
+    return partial[0]["id"] if len(partial) == 1 else None
 
 
 class BasicsExtract(BaseModel):
@@ -93,9 +127,9 @@ def make_intake_nodes(model: ModelClient, mcp: MCPCaller):
         writer = get_stream_writer()
         writer(events.stage("basics"))
         values = {f: getattr(state, f) for f in BASICS_FIELDS}
-        pabu = await fetch_values(mcp, "pabu")
-        mtypes = await fetch_values(mcp, "matter_type", values["pabu"])
-        msubs = await fetch_values(mcp, "matter_subtype", values["matter_type"])
+        pabu = await fetch_values(mcp, "pabu", state=state)
+        mtypes = await fetch_values(mcp, "matter_type", values["pabu"], state)
+        msubs = await fetch_values(mcp, "matter_subtype", values["matter_type"], state)
         missing = [f for f in BASICS_FIELDS if not values[f]]
         c = events.card("BasicInfoCard", values=values, pabu=pabu,
                         matter_types=mtypes, matter_subtypes=msubs, missing=missing)
@@ -103,13 +137,17 @@ def make_intake_nodes(model: ModelClient, mcp: MCPCaller):
         payload = interrupt(c)
         if payload.get("type") == "text":
             updates: dict = {}
-            extracted = await model.extract(BasicsExtract, EXTRACT_SYSTEM,
-                                            payload["text"])
+            try:
+                extracted = await model.extract(BasicsExtract, EXTRACT_SYSTEM,
+                                                payload["text"])
+            except Exception:
+                report_model_failure(writer, "extraction")
+                return Command(goto="basics")
             if extracted:
                 if extracted.matter_name:
                     updates["matter_name"] = extracted.matter_name
-                all_types = await fetch_values(mcp, "matter_type")
-                all_subs = await fetch_values(mcp, "matter_subtype")
+                all_types = await fetch_values(mcp, "matter_type", state=state)
+                all_subs = await fetch_values(mcp, "matter_subtype", state=state)
                 for field, matched in (
                     ("pabu", match_label(pabu, extracted.pabu_label)),
                     ("matter_type", match_label(all_types, extracted.matter_type_label)),
@@ -140,7 +178,7 @@ def make_intake_nodes(model: ModelClient, mcp: MCPCaller):
     async def jurisdiction(state: MatterDraft) -> Command:
         writer = get_stream_writer()
         writer(events.stage("jurisdiction"))
-        countries = await fetch_values(mcp, "country")
+        countries = await fetch_values(mcp, "country", state=state)
         c = events.card("JurisdictionCard", countries=countries,
                         values={"country": state.country,
                                 "state_region": state.state_region})
@@ -152,12 +190,17 @@ def make_intake_nodes(model: ModelClient, mcp: MCPCaller):
         country = payload["values"]["country"]
         region = payload["values"].get("state_region")
         try:
-            res = await mcp.call("get_required_fields", {"country": country})
-        except Exception as e:
-            writer(events.error("MCP_UNAVAILABLE", f"required fields unavailable: {e}", None))
+            res = await mcp.call("get_required_fields", {"country": country, **who(state)})
+        except Exception:
+            report_mcp_failure(writer, "get_required_fields")
             return Command(update={"country": country, "state_region": region},
                            goto="jurisdiction")
-        fields = res.get("fields", []) if res.get("ok") else []
+        if not res.get("ok"):
+            err = res["error"]
+            writer(events.error(err["code"], err["message"], err.get("field")))
+            return Command(update={"country": country, "state_region": region},
+                           goto="jurisdiction")
+        fields = res.get("fields", [])
         if fields:
             writer(events.card("AdditionalInfoNotice", fields=fields))
         dest = nxt(state, "cond_fields" if fields else "pic_risk")
@@ -173,9 +216,10 @@ def make_intake_nodes(model: ModelClient, mcp: MCPCaller):
         c = events.card(
             "AdditionalFieldsCard",
             required=state.required_extra_fields,
-            business_segments=await fetch_values(mcp, "business_segment"),
-            legal_entities=await fetch_values(mcp, "legal_entity"),
-            confidentiality_classes=await fetch_values(mcp, "confidentiality_class"),
+            business_segments=await fetch_values(mcp, "business_segment", state=state),
+            legal_entities=await fetch_values(mcp, "legal_entity", state=state),
+            confidentiality_classes=await fetch_values(
+                mcp, "confidentiality_class", state=state),
             values=values,
         )
         writer(c)

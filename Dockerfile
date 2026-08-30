@@ -10,5 +10,7 @@ ENV PIP_CERT=/etc/ssl/certs/ca-certificates.crt \
 COPY pyproject.toml ./
 COPY src ./src
 RUN pip install --no-cache-dir .
+RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin appuser
+USER appuser
 EXPOSE 8080
 CMD ["uvicorn", "agent_service.app:app", "--host", "0.0.0.0", "--port", "8080"]

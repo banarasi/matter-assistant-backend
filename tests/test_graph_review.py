@@ -45,6 +45,14 @@ async def test_edit_loop_returns_to_review(graph):
     assert snap["allocations"][0]["pct"] == 50
 
 
+async def test_non_persistable_core_edit_action_is_ignored(graph):
+    cfg = {"configurable": {"thread_id": "v-core"}}
+    await drive_to_review(graph, cfg, "v-core")
+    evs = await send(graph, cfg, {"type": "action", "name": "edit:basics"})
+    assert "BasicInfoCard" not in cards(evs)
+    assert "ReviewCard" in cards(evs)
+
+
 async def test_submit_finishes(graph, fake_mcp):
     cfg = {"configurable": {"thread_id": "v3"}}
     await drive_to_review(graph, cfg, "v3")
@@ -104,6 +112,8 @@ async def test_submit_transport_failure_returns_to_review(fake_mcp):
     await drive_to_review(graph, cfg, "v5")
     evs = await send(graph, cfg, {"type": "action", "name": "confirm_submit"})
     assert "MCP_UNAVAILABLE" in errors(evs)
+    messages = [event.get("message", "") for event in evs if event.get("type") == "error"]
+    assert all("connection lost" not in message for message in messages)
     assert "SubmittedCard" not in cards(evs)
     assert "ReviewCard" in cards(evs)  # landed back on review
     # once the transport recovers, the same confirm succeeds

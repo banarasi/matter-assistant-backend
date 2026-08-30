@@ -1,12 +1,14 @@
+import math
+
 from langgraph.config import get_stream_writer
 from langgraph.types import Command, interrupt
 
 from .. import events, validation
 from ..mcp_client import MCPCaller
 from ..state import MatterDraft
-from .nodes_intake import fetch_values, idem_key, nxt
+from .nodes_intake import fetch_values, idem_key, nxt, report_mcp_failure, who
 
-WHO = lambda s: {"requested_by": s.requested_by, "correlation_id": s.correlation_id}
+WHO = who
 
 COUNSEL_FIELDS = ("organization_id", "organization_name",
                    "outside_counsel_id", "outside_counsel_name")
@@ -20,8 +22,8 @@ async def _call(mcp: MCPCaller, writer, tool: str, args: dict) -> dict | None:
     # rather than crashing the node.
     try:
         return await mcp.call(tool, args)
-    except Exception as e:
-        writer(events.error("MCP_UNAVAILABLE", f"{tool} unavailable: {e}", None))
+    except Exception:
+        report_mcp_failure(writer, tool)
         return None
 
 
@@ -51,21 +53,27 @@ def make_setup_nodes(model, mcp: MCPCaller):
         ptype = payload.get("type")
 
         if ptype == "action" and payload.get("name") == "search_org":
+            draft = {k: v for k, v in payload.get("values", {}).items()
+                     if k in COUNSEL_FIELDS}
             res = await _call(mcp, writer, "search_organizations",
-                              {"query": payload.get("query", "")})
+                              {"query": payload.get("query", ""), **WHO(state)})
             if res is None:
-                return Command(goto="counsel")
+                return Command(update=draft, goto="counsel")
             return Command(
-                update={"ui_results": {**state.ui_results, "organizations": res.get("items", [])}},
+                update={**draft, "ui_results": {
+                    **state.ui_results, "organizations": res.get("items", [])}},
                 goto="counsel")
 
         if ptype == "action" and payload.get("name") == "search_counsel":
+            draft = {k: v for k, v in payload.get("values", {}).items()
+                     if k in COUNSEL_FIELDS}
             res = await _call(mcp, writer, "search_outside_counsel",
-                              {"query": payload.get("query", "")})
+                              {"query": payload.get("query", ""), **WHO(state)})
             if res is None:
-                return Command(goto="counsel")
+                return Command(update=draft, goto="counsel")
             return Command(
-                update={"ui_results": {**state.ui_results, "counsel": res.get("items", [])}},
+                update={**draft, "ui_results": {
+                    **state.ui_results, "counsel": res.get("items", [])}},
                 goto="counsel")
 
         if ptype == "card_submit":
@@ -101,6 +109,8 @@ def make_setup_nodes(model, mcp: MCPCaller):
                 e = res["error"]
                 writer(events.error(e["code"], e["message"], e.get("field")))
                 return Command(update=updates, goto="counsel")
+            updates["organization_id"] = res["org_id"]
+            updates["organization_name"] = res["org_name"]
             if merged["outside_counsel_id"]:
                 res2 = await _call(mcp, writer, "add_matter_party", {
                     "matter_id": state.matter_id, "org_id": merged["outside_counsel_id"],
@@ -114,6 +124,8 @@ def make_setup_nodes(model, mcp: MCPCaller):
                     e = res2["error"]
                     writer(events.error(e["code"], e["message"], e.get("field")))
                     return Command(update=updates, goto="counsel")
+                updates["outside_counsel_id"] = res2["org_id"]
+                updates["outside_counsel_name"] = res2["org_name"]
             dest = nxt(state, "allocation")
             return Command(
                 update={**updates, "current_stage": dest, "return_to": None, "ui_results": {}},
@@ -125,7 +137,8 @@ def make_setup_nodes(model, mcp: MCPCaller):
     async def allocation(state: MatterDraft) -> Command:
         writer = get_stream_writer()
         writer(events.stage("allocation"))
-        res = await _call(mcp, writer, "search_cost_centers", {"query": ""})
+        res = await _call(mcp, writer, "search_cost_centers",
+                          {"query": "", **WHO(state)})
         cost_centers = res.get("items", []) if res is not None else []
         c = events.card("AllocationCard", cost_centers=cost_centers,
                         values={"allocations": state.allocations})
@@ -134,6 +147,10 @@ def make_setup_nodes(model, mcp: MCPCaller):
         if payload.get("type") != "card_submit":
             return Command(goto="allocation")
         allocs = payload["values"].get("allocations", [])
+        if not isinstance(allocs, list):
+            writer(events.error("ALLOCATION_SUM_INVALID",
+                                "allocations must be a list", "allocations"))
+            return Command(goto="allocation")
         if len(allocs) > 1 and validation.allocations_total(allocs) != 100:
             writer(events.error("ALLOCATION_SUM_INVALID",
                                 "allocations must total exactly 100%", "allocations"))
@@ -171,7 +188,7 @@ def make_setup_nodes(model, mcp: MCPCaller):
                 "let's do that first."))
             return Command(update={"current_stage": "counsel"}, goto="counsel")
         writer(events.stage("budget"))
-        fiscal_periods = await fetch_values(mcp, "fiscal_period")
+        fiscal_periods = await fetch_values(mcp, "fiscal_period", state=state)
         c = events.card(
             "BudgetCard", org_name=state.organization_name,
             fiscal_periods=fiscal_periods,
@@ -194,7 +211,7 @@ def make_setup_nodes(model, mcp: MCPCaller):
             amount = float(v.get("amount") or 0)
         except (ValueError, TypeError):
             amount = 0.0
-        if amount <= 0:
+        if not math.isfinite(amount) or amount <= 0:
             writer(events.error("REQUIRED_FIELD_MISSING",
                                 "a positive amount is required", "amount"))
             return echo()

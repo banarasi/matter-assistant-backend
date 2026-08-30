@@ -16,22 +16,23 @@ class AnthropicModelClient:
     """Extractor: Haiku-class structured outputs. Conversationalist: Sonnet-class streaming."""
 
     def __init__(self, settings: Settings):
-        self.client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key or None)
+        self.client = anthropic.AsyncAnthropic(
+            api_key=settings.anthropic_api_key or None,
+            timeout=30.0,
+            max_retries=2,
+        )
         self.extractor_model = settings.extractor_model
         self.converse_model = settings.converse_model
 
     async def extract(self, schema, instruction, text):
-        try:
-            resp = await self.client.messages.parse(
-                model=self.extractor_model,
-                max_tokens=1024,
-                system=instruction,
-                messages=[{"role": "user", "content": text}],
-                output_format=schema,
-            )
-            return resp.parsed_output
-        except anthropic.APIError:
-            return None
+        resp = await self.client.messages.parse(
+            model=self.extractor_model,
+            max_tokens=1024,
+            system=instruction,
+            messages=[{"role": "user", "content": text}],
+            output_format=schema,
+        )
+        return resp.parsed_output
 
     async def converse_stream(self, system, user):
         async with self.client.messages.stream(

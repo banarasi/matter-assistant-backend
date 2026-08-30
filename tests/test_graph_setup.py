@@ -4,7 +4,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from agent_service.graph.builder import build_graph
 from agent_service.model_client import StubModelClient
 
-from .graph_utils import cards, errors, last_card, send, start
+from .graph_utils import cards, errors, last_card, send
 from .test_graph_risk import RISK, drive_to_pic_risk
 
 
@@ -34,6 +34,27 @@ async def test_counsel_search_and_attach(graph, fake_mcp):
     assert len(snap["parties"]) == 2
 
 
+async def test_counsel_search_preserves_unsent_organization(graph):
+    cfg = {"configurable": {"thread_id": "s-draft"}}
+    await drive_to_counsel(graph, cfg, "s-draft")
+    draft = {"organization_id": "ORG-BM", "organization_name": "Baker McKenzie"}
+    evs = await send(graph, cfg, {
+        "type": "action", "name": "search_counsel", "query": "clifford",
+        "values": draft,
+    })
+    assert last_card(evs, "OrgCounselCard")["values"]["organization_id"] == "ORG-BM"
+
+
+async def test_counsel_names_are_canonicalized(graph):
+    cfg = {"configurable": {"thread_id": "s-canonical"}}
+    await drive_to_counsel(graph, cfg, "s-canonical")
+    evs = await send(graph, cfg, {"type": "card_submit", "values": {
+        "organization_id": "ORG-BM", "organization_name": "Spoofed Org"}})
+    assert "AllocationCard" in cards(evs)
+    snapshot = await graph.aget_state(cfg)
+    assert snapshot.values["organization_name"] == "Baker McKenzie"
+
+
 async def test_allocation_rejects_bad_sum_then_accepts(graph):
     cfg = {"configurable": {"thread_id": "s2"}}
     await drive_to_counsel(graph, cfg, "s2")
@@ -59,7 +80,7 @@ async def test_single_allocation_auto_100_and_budget_uniqueness(graph, fake_mcp)
     assert props["org_name"] == "Baker McKenzie"
     evs = await send(graph, cfg, {"type": "card_submit", "values": {
         "amount": 150000, "currency": "USD", "fiscal_period": "FY2027"}})
-    assert "ReviewCard" in cards(evs) or True  # review node may still be a placeholder
+    assert "ReviewCard" in cards(evs)
     snap = await fake_mcp.call("get_matter", {"matter_id": "MAT-2026-001245"})
     assert snap["allocations"][0]["pct"] == 100
     assert snap["budgets"][0]["amount"] == 150000.0
