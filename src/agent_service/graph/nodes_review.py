@@ -47,7 +47,7 @@ def make_review_nodes(model, mcp):
                   "You are the Enterprise Matter Assistant. Summarize the matter "
                   "configuration for final review in 2-3 sentences.",
                   json.dumps(snap))
-        return Command(goto="review")
+        return Command(update={"current_stage": "review"}, goto="review")
 
     async def review(state: MatterDraft) -> Command:
         # Exactly ONE interrupt() per execution: on resume, only the snapshot
@@ -76,11 +76,17 @@ def make_review_nodes(model, mcp):
     async def submit(state: MatterDraft) -> Command:
         writer = get_stream_writer()
         writer(events.stage("submit"))
-        res = await mcp.call("submit_matter", {
-            "matter_id": state.matter_id,
-            "idempotency_key": idem_key(state, "submit"),
-            "requested_by": state.requested_by,
-            "correlation_id": state.correlation_id})
+        # Same transport guard as _get_matter/_call: an MCP outage during
+        # submission must land the user back on review, not crash the node.
+        try:
+            res = await mcp.call("submit_matter", {
+                "matter_id": state.matter_id,
+                "idempotency_key": idem_key(state, "submit"),
+                "requested_by": state.requested_by,
+                "correlation_id": state.correlation_id})
+        except Exception as e:
+            writer(events.error("MCP_UNAVAILABLE", f"submission failed: {e}", None))
+            return Command(goto="review", update={"current_stage": "review"})
         if not res.get("ok"):
             e = res["error"]
             writer(events.error(e["code"], e["message"], e.get("field")))

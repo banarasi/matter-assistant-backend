@@ -55,6 +55,34 @@ async def test_submit_finishes(graph, fake_mcp):
     assert snap["status"] == "submitted"
 
 
+class FlakyMCP:
+    """Delegates to the real fake MCP but raises on submit_matter while failing."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.failing = True
+
+    async def call(self, tool: str, args: dict) -> dict:
+        if self.failing and tool == "submit_matter":
+            raise RuntimeError("mcp connection lost")
+        return await self.inner.call(tool, args)
+
+
+async def test_submit_transport_failure_returns_to_review(fake_mcp):
+    flaky = FlakyMCP(fake_mcp)
+    graph = build_graph(StubModelClient(), flaky, MemorySaver())
+    cfg = {"configurable": {"thread_id": "v5"}}
+    await drive_to_review(graph, cfg, "v5")
+    evs = await send(graph, cfg, {"type": "action", "name": "confirm_submit"})
+    assert "MCP_UNAVAILABLE" in errors(evs)
+    assert "SubmittedCard" not in cards(evs)
+    assert "ReviewCard" in cards(evs)  # landed back on review
+    # once the transport recovers, the same confirm succeeds
+    flaky.failing = False
+    evs = await send(graph, cfg, {"type": "action", "name": "confirm_submit"})
+    assert "SubmittedCard" in cards(evs)
+
+
 async def test_double_submit_is_idempotent(graph, fake_mcp):
     cfg = {"configurable": {"thread_id": "v4"}}
     await drive_to_review(graph, cfg, "v4")
