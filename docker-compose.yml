@@ -1,0 +1,79 @@
+# Full demo stack. The mcp-server and portal services build from SIBLING checkouts:
+#
+#   Demo/
+#     passport-mcp-server/       <- required for the mcp-server service
+#     matter-assistant-backend/  <- this repo (run compose from here)
+#     matter-assistant-ui/       <- required for the portal service
+#
+# For backend development/tests alone:  docker compose up -d postgres
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: passport
+      POSTGRES_PASSWORD: passport
+      POSTGRES_DB: passport
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./docker/initdb:/docker-entrypoint-initdb.d
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U passport"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+  mcp-server:
+    build: ../passport-mcp-server
+    environment:
+      DATABASE_URL: postgresql://passport:passport@postgres:5432/passport
+      MCP_PORT: "8081"
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8081), 2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+  agent-service:
+    build: .
+    environment:
+      MCP_SERVER_URL: http://mcp-server:8081/mcp
+      AGENT_DATABASE_URL: postgresql://passport:passport@postgres:5432/agent
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      EXTRACTOR_MODEL: ${EXTRACTOR_MODEL:-claude-haiku-4-5}
+      CONVERSE_MODEL: ${CONVERSE_MODEL:-claude-sonnet-5}
+      USE_STUB_MODEL: ${USE_STUB_MODEL:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mcp-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+  portal:
+    build:
+      context: ../matter-assistant-ui
+      args:
+        NEXT_PUBLIC_AGENT_URL: ${NEXT_PUBLIC_AGENT_URL:-http://localhost:8080}
+    ports:
+      - "3000:3000"
+    depends_on:
+      agent-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then(r => { if (!r.ok) process.exit(1) })"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+volumes:
+  pgdata:
