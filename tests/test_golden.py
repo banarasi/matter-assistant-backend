@@ -20,11 +20,16 @@ def mkgraph(fake_mcp, extractions=None):
     return build_graph(StubModelClient(extractions=extractions), fake_mcp, MemorySaver())
 
 
-async def run_happy_path(graph, cfg, cid, country="CH"):
+async def run_happy_path(graph, cfg, cid, country="CH", steps=None):
+    """Drive the full wizard to submission. If `steps` is a dict, per-step
+    events are recorded into it (currently just the jurisdiction submit) so
+    callers can assert on intermediate turns without re-driving the flow."""
     await start(graph, cfg, conversation_id=cid)
     await send(graph, cfg, {"type": "action", "name": "start"})
     await send(graph, cfg, {"type": "card_submit", "values": BASICS})
     evs = await send(graph, cfg, {"type": "card_submit", "values": {"country": country}})
+    if steps is not None:
+        steps["jurisdiction"] = evs
     if country == "CH":
         evs = await send(graph, cfg, {"type": "card_submit", "values": COND})
     await send(graph, cfg, {"type": "card_submit", "values": PIC})
@@ -55,8 +60,12 @@ async def test_golden_happy_path_ch(fake_mcp):
 async def test_golden_non_ch_skips_cond_fields(fake_mcp):
     graph = mkgraph(fake_mcp)
     cfg = {"configurable": {"thread_id": "g2"}}
-    evs = await run_happy_path(graph, cfg, "g2", country="US")
+    steps = {}
+    evs = await run_happy_path(graph, cfg, "g2", country="US", steps=steps)
     assert "SubmittedCard" in cards(evs)
+    # make the skip explicit: the US jurisdiction submit never rendered the
+    # CH-only conditional-fields card
+    assert "AdditionalFieldsCard" not in cards(steps["jurisdiction"])
 
 
 async def test_golden_allocation_error_recovery(fake_mcp):
@@ -114,6 +123,12 @@ async def test_golden_edit_loop(fake_mcp):
     assert "ReviewCard" in cards(evs)
     evs = await send(graph, cfg, {"type": "action", "name": "confirm_submit"})
     assert "SubmittedCard" in cards(evs)
+    # the edited 50/50 split (not the original single-cc auto-100) is what
+    # actually persisted on the submitted matter
+    mid = last_card(evs, "SubmittedCard")["matter_id"]
+    snap = await fake_mcp.call("get_matter", {"matter_id": mid})
+    assert sorted((a["cc_id"], a["pct"]) for a in snap["allocations"]) == [
+        ("100045", 50), ("100078", 50)]
 
 
 async def test_golden_free_text_offscript(fake_mcp):
