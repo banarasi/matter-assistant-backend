@@ -33,6 +33,10 @@ def make_risk_nodes(model, mcp: MCPCaller):
         c = events.card(
             "PicRiskCard",
             employees=employees,
+            # "employees" is only present in ui_results after a search/pic_self
+            # action (possibly as []), so this distinguishes "searched, no
+            # matches" from "never searched" for the card's empty-result note.
+            searched="employees" in state.ui_results,
             values=values,
             incident_risk_categories=await fetch_values(mcp, "incident_risk_category"),
             nfr_taxonomies=await fetch_values(mcp, "nfr_taxonomy"),

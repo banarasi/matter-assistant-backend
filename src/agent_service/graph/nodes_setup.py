@@ -39,6 +39,11 @@ def make_setup_nodes(model, mcp: MCPCaller):
             "OrgCounselCard",
             organizations=state.ui_results.get("organizations", []),
             counsel=state.ui_results.get("counsel", []),
+            # each key is only present in ui_results after that section's
+            # search action ran (possibly as []), so these distinguish
+            # "searched, no matches" from "never searched" per section.
+            org_searched="organizations" in state.ui_results,
+            counsel_searched="counsel" in state.ui_results,
             values=values,
         )
         writer(c)
