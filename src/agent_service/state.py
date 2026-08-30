@@ -40,6 +40,14 @@ class MatterDraft(BaseModel):
     # payload sent to the MCP server. Cleared ({}) whenever a node hands off to
     # the next stage.
     ui_results: dict = Field(default_factory=dict)
+    # Bumped on every review-edit revisit (see nodes_review.py). Folded into
+    # idem_key so content-derived idempotency keys stay stable across a node's
+    # own LangGraph replays (same key each time the node body re-runs before
+    # its interrupt resolves) but change across A->B->A edit cycles, where the
+    # user resubmits byte-identical content that was already cached server
+    # side from an earlier visit. NOT part of core_payload: it is bookkeeping
+    # for the agent's write plumbing, not matter data.
+    write_seq: int = 0
 
     def core_payload(self) -> dict:
         keys = ["matter_name", "pabu", "matter_type", "matter_subtype", "country",

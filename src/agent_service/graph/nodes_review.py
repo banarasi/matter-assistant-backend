@@ -66,7 +66,8 @@ def make_review_nodes(model, mcp):
             target = name.split(":", 1)[1]
             if target in EDIT_TARGETS:
                 return Command(
-                    update={"return_to": "review_summary", "current_stage": target},
+                    update={"return_to": "review_summary", "current_stage": target,
+                            "write_seq": state.write_seq + 1},
                     goto=target)
         if ptype == "action" and name == "confirm_submit":
             return Command(update={"current_stage": "submit"}, goto="submit")

@@ -78,6 +78,17 @@ def make_setup_nodes(model, mcp: MCPCaller):
                 writer(events.error("REQUIRED_FIELD_MISSING",
                                     "select an organization", field))
                 return Command(update=updates, goto="counsel")
+            if (state.matter_id and state.organization_id
+                    and merged["organization_id"] != state.organization_id):
+                # No remove-party tool exists in the fixed 13-tool MCP catalog,
+                # so swapping the organization on an edit revisit can only add
+                # the new party — the previously attached one stays on the
+                # matter server-side. Be honest about that instead of silently
+                # implying the old party was replaced.
+                writer(events.text_delta(
+                    "Note: the previously added organization remains attached "
+                    "to the matter (Passport exposes no remove-party operation "
+                    "in this build)."))
             res = await _call(mcp, writer, "add_matter_party", {
                 "matter_id": state.matter_id, "org_id": merged["organization_id"],
                 "role": "organization",
@@ -147,6 +158,18 @@ def make_setup_nodes(model, mcp: MCPCaller):
 
     async def budget(state: MatterDraft) -> Command:
         writer = get_stream_writer()
+        if not state.organization_id:
+            # configure_budget can route here (via allocation) before an
+            # organization has ever been attached to the matter — e.g. straight
+            # off MatterCreatedCard. Without this guard the card would render
+            # "Budget for null" and create_budget(org_id=None) would fail its
+            # NOT NULL constraint on every retry, trapping the user in an
+            # MCP_UNAVAILABLE loop with no way out. Send them to add an
+            # organization first instead.
+            writer(events.text_delta(
+                "An organization must be added before configuring a budget — "
+                "let's do that first."))
+            return Command(update={"current_stage": "counsel"}, goto="counsel")
         writer(events.stage("budget"))
         fiscal_periods = await fetch_values(mcp, "fiscal_period")
         c = events.card(

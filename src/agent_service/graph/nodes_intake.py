@@ -35,8 +35,8 @@ COND_FIELDS = ("business_segment", "legal_entity", "confidentiality_class")
 
 
 def idem_key(state: MatterDraft, node: str, payload: dict | None = None) -> str:
-    raw = json.dumps({"c": state.conversation_id, "n": node, "p": payload or {}},
-                     sort_keys=True)
+    raw = json.dumps({"c": state.conversation_id, "n": node, "p": payload or {},
+                      "s": getattr(state, "write_seq", 0)}, sort_keys=True)
     return hashlib.sha256(raw.encode()).hexdigest()
 
 

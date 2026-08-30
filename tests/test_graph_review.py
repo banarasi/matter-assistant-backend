@@ -55,6 +55,35 @@ async def test_submit_finishes(graph, fake_mcp):
     assert snap["status"] == "submitted"
 
 
+async def test_edit_revisit_a_b_a_persists_final_value(graph, fake_mcp):
+    # F3 regression: content-derived idempotency keys used to be stable across
+    # an A->B->A edit cycle, so resubmitting A (having already submitted it
+    # once before B) replayed the MCP server's cached response for A's *first*
+    # submission instead of writing again — except by then the matter's
+    # persisted allocations were B, and the agent still reported success,
+    # silently leaving the DB out of sync with what the user last submitted.
+    cfg = {"configurable": {"thread_id": "v6"}}
+    alloc_a = [{"cc_id": "100045", "pct": 70}, {"cc_id": "100078", "pct": 30}]
+    alloc_b = [{"cc_id": "100045", "pct": 50}, {"cc_id": "100078", "pct": 50}]
+    matter_id = None
+
+    async def submit(allocs):
+        nonlocal matter_id
+        await send(graph, cfg, {"type": "action", "name": "edit:allocation"})
+        evs = await send(graph, cfg, {"type": "card_submit", "values": {"allocations": allocs}})
+        assert "ReviewCard" in cards(evs)
+        matter_id = last_card(evs, "ReviewCard")["snapshot"]["matter_id"]
+
+    await drive_to_review(graph, cfg, "v6")  # submits A the first time
+    await submit(alloc_b)   # A -> B
+    await submit(alloc_a)   # B -> A again (same content as the original submit)
+
+    snap = await fake_mcp.call("get_matter", {"matter_id": matter_id})
+    persisted = sorted(snap["allocations"], key=lambda a: a["cc_id"])
+    assert persisted[0]["cc_id"] == "100045" and persisted[0]["pct"] == 70
+    assert persisted[1]["cc_id"] == "100078" and persisted[1]["pct"] == 30
+
+
 class FlakyMCP:
     """Delegates to the real fake MCP but raises on submit_matter while failing."""
 

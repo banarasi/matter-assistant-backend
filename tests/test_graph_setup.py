@@ -92,6 +92,23 @@ async def test_allocation_error_preserves_submitted_split(graph):
     assert last_card(evs, "AllocationCard")["values"]["allocations"] == bad
 
 
+async def test_configure_budget_without_org_redirects_to_counsel(graph):
+    # F1 regression: MatterCreatedCard's configure_budget action routes to
+    # allocation first (see nodes_risk.create_shell), so the guard only fires
+    # once allocation hands off to budget with organization_id still None.
+    cfg = {"configurable": {"thread_id": "s7"}}
+    await drive_to_pic_risk(graph, cfg, "s7")
+    evs = await send(graph, cfg, {"type": "card_submit", "values": {
+        "pic_employee_id": "E1001", "pic_employee_name": "Jane Smith", **RISK}})
+    assert "MatterCreatedCard" in cards(evs)
+    evs = await send(graph, cfg, {"type": "action", "name": "configure_budget"})
+    assert "AllocationCard" in cards(evs)
+    evs = await send(graph, cfg, {"type": "card_submit", "values": {"allocations": [
+        {"cc_id": "100045", "pct": 70}, {"cc_id": "100078", "pct": 30}]}})
+    assert "BudgetCard" not in cards(evs)
+    assert "OrgCounselCard" in cards(evs)
+
+
 async def test_budget_rejects_nonpositive_amount(graph, fake_mcp):
     cfg = {"configurable": {"thread_id": "s6"}}
     await drive_to_counsel(graph, cfg, "s6")
