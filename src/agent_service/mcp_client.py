@@ -4,6 +4,8 @@ from typing import Protocol
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
+from .config import Settings
+
 
 class MCPCaller(Protocol):
     async def call(self, tool: str, args: dict) -> dict: ...
@@ -26,3 +28,12 @@ class MCPClient:
                 if not isinstance(payload, dict):
                     raise RuntimeError(f"MCP tool {tool} returned a non-object response")
                 return payload
+
+
+def make_mcp_client(settings: Settings) -> MCPCaller:
+    """Real Streamable-HTTP client, or the in-process stub when USE_STUB_MCP=true."""
+    if settings.use_stub_mcp:
+        from .stub_mcp import StubMCPClient  # lazy: pulls in passport_mcp
+
+        return StubMCPClient()
+    return MCPClient(settings.mcp_server_url)

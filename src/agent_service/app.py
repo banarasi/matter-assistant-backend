@@ -29,14 +29,14 @@ def loop_factory() -> asyncio.AbstractEventLoop:
 from fastapi import FastAPI, Header, HTTPException, Path, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 from pydantic import BaseModel, ConfigDict, Field
 
 from .config import settings
 from .events import error
 from .graph.builder import build_graph
-from .mcp_client import MCPClient
+from .mcp_client import make_mcp_client
 from .model_client import make_model_client
 from .state import MatterDraft
 
@@ -75,11 +75,31 @@ ConversationId = Annotated[
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def make_checkpointer():
+    """LangGraph thread-state store, selected by AGENT_CHECKPOINTER (see config.py)."""
+    if settings.checkpointer == "memory":
+        logger.warning(
+            "AGENT_CHECKPOINTER=memory: conversation state is held in-process and lost "
+            "on restart; use postgres for anything beyond local dev/demo")
+        yield MemorySaver()
+        return
+    # Imported lazily so memory mode has no psycopg/Postgres requirement at all.
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
     async with AsyncPostgresSaver.from_conn_string(settings.agent_database_url) as saver:
         await saver.setup()
+        yield saver
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with make_checkpointer() as saver:
+        if settings.use_stub_mcp:
+            logger.warning(
+                "USE_STUB_MCP=true: Passport tools run in-process over an in-memory "
+                "store (MCP_SERVER_URL ignored); matters are lost on restart")
         app.state.graph = build_graph(
-            make_model_client(settings), MCPClient(settings.mcp_server_url), saver)
+            make_model_client(settings), make_mcp_client(settings), saver)
         yield
 
 
